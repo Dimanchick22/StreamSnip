@@ -1,0 +1,11 @@
+# Скачивание VOD (Twitch, YouTube, Kick)
+yt-dlp>=2024.1.0
+
+# Транскрипция аудио с CUDA-ускорением
+faster-whisper>=1.0.0
+
+# HTTP-клиент для запросов к ollama и проверки сети
+requests>=2.31.0
+
+# Веб-интерфейс
+gradio>=4.0.0
