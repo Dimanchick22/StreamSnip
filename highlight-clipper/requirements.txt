@@ -9,3 +9,11 @@ requests>=2.31.0
 
 # Веб-интерфейс (>=4.21 нужен для show_progress_on)
 gradio>=4.21.0
+
+# Детекция боя: инференс ResNet18 на CUDA + чтение кадров видео.
+# Для RTX 5090 (Blackwell) ставь сборку torch под нужный CUDA-тулкит,
+# например: pip install torch torchvision --index-url \
+#   https://download.pytorch.org/whl/cu124
+torch>=2.0.0
+torchvision>=0.15.0
+opencv-python>=4.8.0
