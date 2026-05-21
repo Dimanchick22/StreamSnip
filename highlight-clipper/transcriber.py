@@ -33,7 +33,7 @@ def _get_model(model_size: str, device: str, compute_type: str) -> WhisperModel:
 
 def transcribe(
     video_path: str,
-    model_size: str = "large-v3",
+    model_size: str = "large-v3-turbo",
     device: str = "cuda",
     compute_type: str = "float16",
     language: str | None = None,
@@ -43,7 +43,8 @@ def transcribe(
 
     Параметры:
         video_path: путь к видеофайлу (faster-whisper сам извлечёт аудио).
-        model_size: размер модели Whisper (tiny/base/small/medium/large-v3).
+        model_size: размер модели Whisper
+            (tiny/base/small/medium/large-v3-turbo/large-v3).
         device: "cuda" для RTX 5090 или "cpu".
         compute_type: тип вычислений ("float16" для CUDA, "int8" для CPU).
         language: код языка ("ru", "en", …) или None для автоопределения.

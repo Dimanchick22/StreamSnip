@@ -1,12 +1,13 @@
 """Логика скачивания VOD через yt-dlp.
 
-Поддерживаются Twitch, YouTube и Kick. Видео сохраняется во временную
-папку, откуда его дальше забирают транскрайбер и нарезчик.
+Поддерживаются Twitch, YouTube и Kick. Видео кэшируется в постоянную папку
+по id ролика: если файл уже скачан, повторная загрузка не выполняется —
+это спасает от перекачивания после ошибки на следующих этапах пайплайна.
 """
 
+import glob
 import os
 import re
-import tempfile
 
 import yt_dlp
 
@@ -24,11 +25,22 @@ def _sanitize_filename(name: str) -> str:
     return cleaned[:120] or "vod"
 
 
-def download_vod(url: str, progress_callback=None) -> dict:
-    """Скачивает VOD по ссылке.
+def _find_cached_file(cache_dir: str, video_id: str) -> str | None:
+    """Ищет уже скачанный файл VOD по его id (исключая недокачанные .part)."""
+    matches = [
+        path
+        for path in glob.glob(os.path.join(cache_dir, f"{video_id}.*"))
+        if not path.endswith(".part") and os.path.isfile(path)
+    ]
+    return matches[0] if matches else None
+
+
+def download_vod(url: str, cache_dir: str = "./vod_cache", progress_callback=None) -> dict:
+    """Скачивает VOD по ссылке (с кэшированием).
 
     Параметры:
         url: ссылка на стрим/VOD (Twitch, YouTube, Kick).
+        cache_dir: папка для постоянного кэша скачанных VOD.
         progress_callback: необязательная функция вида callback(percent, message)
             для обновления прогресс-бара в UI.
 
@@ -37,6 +49,7 @@ def download_vod(url: str, progress_callback=None) -> dict:
             "video_path": путь к скачанному файлу,
             "title": очищенное название VOD,
             "duration": длительность в секундах (или None),
+            "from_cache": True, если файл взят из кэша без скачивания,
         }
 
     Бросает DownloadError при любой проблеме.
@@ -45,9 +58,34 @@ def download_vod(url: str, progress_callback=None) -> dict:
         raise DownloadError("Не указана ссылка на VOD.")
 
     url = url.strip()
+    os.makedirs(cache_dir, exist_ok=True)
 
-    # Временная папка для скачанного видео — чистится ОС/пользователем позже.
-    temp_dir = tempfile.mkdtemp(prefix="highlight_clipper_")
+    # Сначала забираем метаданные без скачивания, чтобы узнать id ролика
+    # и проверить кэш до начала тяжёлой загрузки.
+    meta_opts = {"noplaylist": True, "quiet": True, "no_warnings": True}
+    try:
+        with yt_dlp.YoutubeDL(meta_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except yt_dlp.utils.DownloadError as exc:
+        raise DownloadError(f"yt-dlp не смог получить данные о VOD: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 — ловим всё, чтобы не уронить UI
+        raise DownloadError(f"Неожиданная ошибка при чтении метаданных: {exc}") from exc
+
+    video_id = info.get("id") or "vod"
+    title = _sanitize_filename(info.get("title") or video_id)
+    duration = info.get("duration")
+
+    # Если этот VOD уже скачан — переиспользуем файл, не качаем заново.
+    cached = _find_cached_file(cache_dir, video_id)
+    if cached:
+        if progress_callback:
+            progress_callback(1.0, "VOD найден в кэше — скачивание пропущено.")
+        return {
+            "video_path": cached,
+            "title": title,
+            "duration": duration,
+            "from_cache": True,
+        }
 
     # Хук прогресса yt-dlp -> прокидываем процент в UI.
     def _progress_hook(status: dict) -> None:
@@ -65,7 +103,7 @@ def download_vod(url: str, progress_callback=None) -> dict:
     ydl_opts = {
         # Лучшее качество, но в одном файле (нужен для последующей нарезки).
         "format": "best[ext=mp4]/best",
-        "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
+        "outtmpl": os.path.join(cache_dir, "%(id)s.%(ext)s"),
         "progress_hooks": [_progress_hook],
         "noplaylist": True,
         "quiet": True,
@@ -74,7 +112,6 @@ def download_vod(url: str, progress_callback=None) -> dict:
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Скачиваем и сразу получаем метаданные.
             info = ydl.extract_info(url, download=True)
             video_path = ydl.prepare_filename(info)
     except yt_dlp.utils.DownloadError as exc:
@@ -84,20 +121,14 @@ def download_vod(url: str, progress_callback=None) -> dict:
 
     # yt-dlp мог сохранить файл с другим расширением после постобработки.
     if not os.path.exists(video_path):
-        base = os.path.splitext(video_path)[0]
-        candidates = [
-            os.path.join(temp_dir, f)
-            for f in os.listdir(temp_dir)
-            if f.startswith(os.path.basename(base))
-        ]
-        if not candidates:
+        found = _find_cached_file(cache_dir, video_id)
+        if not found:
             raise DownloadError("Файл скачан, но не найден на диске.")
-        video_path = candidates[0]
-
-    title = _sanitize_filename(info.get("title") or info.get("id") or "vod")
+        video_path = found
 
     return {
         "video_path": video_path,
         "title": title,
-        "duration": info.get("duration"),
+        "duration": duration,
+        "from_cache": False,
     }

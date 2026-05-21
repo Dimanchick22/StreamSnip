@@ -21,24 +21,40 @@ from transcriber import TranscriptionError, transcribe
 CONFIG = {
     # --- ollama (LLM-анализ) ---
     "ollama_url": "http://localhost:11434",   # адрес локального ollama API
-    "ollama_model": "qwen2.5:72b",            # модель: qwen2.5:72b или llama3.3:70b
+    # qwen2.5:32b полностью помещается в 32GB VRAM RTX 5090 (быстро).
+    # qwen2.5:72b / llama3.3:70b точнее, но при Q4 уходят в offload на RAM
+    # (медленнее). 96GB RAM позволяют их запускать как опцию.
+    "ollama_model": "qwen2.5:32b",
     "top_highlights": 10,                     # сколько моментов выбирать
 
     # --- faster-whisper (транскрипция) ---
-    "whisper_model": "large-v3",              # размер модели Whisper
+    # large-v3-turbo — быстрая дистилляция large-v3 (≈4-8x быстрее,
+    # качество почти то же). По умолчанию выбран как лучший баланс.
+    "whisper_model": "large-v3-turbo",
     "whisper_device": "cuda",                 # "cuda" для RTX 5090, иначе "cpu"
     "whisper_compute_type": "float16",        # "float16" для CUDA, "int8" для CPU
     "whisper_language": None,                 # код языка ("ru"/"en") или None — авто
 
-    # --- ffmpeg (нарезка) ---
+    # --- скачивание / нарезка ---
+    "cache_dir": "./vod_cache",               # кэш скачанных VOD (без перекачки)
     "clips_dir": "./clips",                   # корневая папка для готовых клипов
     "buffer_seconds": 15.0,                   # буфер до/после момента, секунды
 }
 
+# Модели Whisper для выпадающего списка: от самых быстрых к самым точным.
+WHISPER_CHOICES = [
+    "tiny",
+    "base",
+    "small",
+    "medium",
+    "large-v3-turbo",
+    "large-v3",
+]
+
 # ============================================================
 
 
-def process_vod(url: str, progress=gr.Progress()):
+def process_vod(url: str, whisper_model: str, progress=gr.Progress()):
     """Прогоняет VOD через весь пайплайн и возвращает результат для UI.
 
     Возвращает кортеж (статусное_сообщение, список_файлов_для_gr.Files).
@@ -46,15 +62,22 @@ def process_vod(url: str, progress=gr.Progress()):
     if not url or not url.strip():
         return "Ошибка: вставь ссылку на VOD.", None
 
+    # Выбранная в UI модель имеет приоритет над значением из CONFIG.
+    whisper_model = whisper_model or CONFIG["whisper_model"]
+
     try:
-        # --- Шаг 1: скачивание VOD ---
+        # --- Шаг 1: скачивание VOD (с кэшем) ---
         progress(0.0, desc="Шаг 1/4 — Скачивание VOD")
 
         def dl_progress(pct, msg):
             # Скачивание занимает первые 25% общего прогресс-бара.
             progress(pct * 0.25, desc=f"Шаг 1/4 — {msg}")
 
-        vod = download_vod(url, progress_callback=dl_progress)
+        vod = download_vod(
+            url,
+            cache_dir=CONFIG["cache_dir"],
+            progress_callback=dl_progress,
+        )
 
         # --- Шаг 2: транскрипция ---
         progress(0.25, desc="Шаг 2/4 — Транскрипция аудио")
@@ -65,7 +88,7 @@ def process_vod(url: str, progress=gr.Progress()):
 
         segments = transcribe(
             vod["video_path"],
-            model_size=CONFIG["whisper_model"],
+            model_size=whisper_model,
             device=CONFIG["whisper_device"],
             compute_type=CONFIG["whisper_compute_type"],
             language=CONFIG["whisper_language"],
@@ -107,10 +130,15 @@ def process_vod(url: str, progress=gr.Progress()):
         progress(1.0, desc="Готово!")
 
         # Формируем текстовый отчёт по клипам.
-        lines = [f"Готово! Нарезано клипов: {len(clips)}", ""]
-        lines.append(f"VOD: {vod['title']}")
-        lines.append(f"Папка: {os.path.abspath(os.path.join(CONFIG['clips_dir'], vod['title']))}")
-        lines.append("")
+        cache_note = " (из кэша)" if vod.get("from_cache") else ""
+        lines = [
+            f"Готово! Нарезано клипов: {len(clips)}",
+            "",
+            f"VOD: {vod['title']}{cache_note}",
+            f"Модель транскрипции: {whisper_model}",
+            f"Папка: {os.path.abspath(os.path.join(CONFIG['clips_dir'], vod['title']))}",
+            "",
+        ]
         for i, clip in enumerate(clips, start=1):
             lines.append(
                 f"{i}. [{clip['start']:.0f}s–{clip['end']:.0f}s] {clip['description']}"
@@ -135,43 +163,60 @@ def process_vod(url: str, progress=gr.Progress()):
 
 def build_ui() -> gr.Blocks:
     """Собирает интерфейс Gradio."""
-    with gr.Blocks(title="Highlight Clipper") as demo:
+    with gr.Blocks(title="Highlight Clipper", theme=gr.themes.Soft()) as demo:
         gr.Markdown(
-            "# Highlight Clipper\n"
-            "Автоматическая нарезка highlights из стримов "
-            "(Twitch, YouTube, Kick).\n\n"
-            "Вставь ссылку на VOD и нажми **Обработать**."
+            """
+            # 🎬 Highlight Clipper
+            Автоматическая нарезка highlights из стримов — **Twitch · YouTube · Kick**.
+
+            Вставь ссылку на VOD, выбери модель транскрипции и нажми **Обработать**.
+            """
         )
 
         with gr.Row():
-            url_input = gr.Textbox(
-                label="Ссылка на VOD",
-                placeholder="https://www.twitch.tv/videos/...",
-                scale=4,
-            )
-            run_button = gr.Button("Обработать", variant="primary", scale=1)
+            # Левая колонка — ввод и настройки.
+            with gr.Column(scale=1):
+                url_input = gr.Textbox(
+                    label="Ссылка на VOD",
+                    placeholder="https://www.twitch.tv/videos/...",
+                )
+                whisper_dropdown = gr.Dropdown(
+                    choices=WHISPER_CHOICES,
+                    value=CONFIG["whisper_model"],
+                    label="Модель транскрипции (Whisper)",
+                    info="turbo — быстро, large-v3 — точнее, tiny/base — очень быстро",
+                )
+                run_button = gr.Button(
+                    "🚀 Обработать", variant="primary", size="lg"
+                )
 
-        status_output = gr.Textbox(
-            label="Статус / результат",
-            lines=14,
-            interactive=False,
-        )
-
-        clips_output = gr.Files(
-            label="Готовые клипы (можно скачать)",
-        )
+            # Правая колонка — статус и результат.
+            with gr.Column(scale=2):
+                status_output = gr.Textbox(
+                    label="Статус / результат",
+                    lines=14,
+                    interactive=False,
+                    show_copy_button=True,
+                )
+                clips_output = gr.Files(
+                    label="Готовые клипы (нажми, чтобы скачать)",
+                )
 
         run_button.click(
             fn=process_vod,
-            inputs=[url_input],
+            inputs=[url_input, whisper_dropdown],
             outputs=[status_output, clips_output],
+            # Показываем прогресс ТОЛЬКО на одном поле, иначе индикатор
+            # дублируется поверх каждого выходного компонента.
+            show_progress_on=[status_output],
         )
 
     return demo
 
 
 if __name__ == "__main__":
-    # Заранее создаём папку для клипов, чтобы не падать на первом запуске.
+    # Заранее создаём папки, чтобы не падать на первом запуске.
     os.makedirs(CONFIG["clips_dir"], exist_ok=True)
+    os.makedirs(CONFIG["cache_dir"], exist_ok=True)
     app = build_ui()
     app.launch()
