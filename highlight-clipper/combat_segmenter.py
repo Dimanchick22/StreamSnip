@@ -175,6 +175,12 @@ def _build_probability_timeline(
         fps = 30.0  # запасное значение, если контейнер не сообщил FPS
     duration = frame_count / fps if frame_count > 0 else None
 
+    # Сколько кадров между сэмплами. Читаем поток ПОСЛЕДОВАТЕЛЬНО и пропускаем
+    # лишние кадры дешёвым grab() (без декодирования в картинку), а декодируем
+    # через retrieve() только нужные. Это на порядок быстрее, чем перематывать
+    # видео cap.set(POS_FRAMES) на каждый сэмпл (перемотка декодит весь GOP).
+    step_frames = max(1, round(fps * sample_step))
+
     times: list[float] = []
     probs: list[float] = []
     batch_tensors: list[torch.Tensor] = []
@@ -191,33 +197,38 @@ def _build_probability_timeline(
         batch_times.clear()
 
     try:
-        i = 0
+        frame_idx = 0
         while True:
-            t = i * sample_step
-            if duration is not None and t > duration:
-                break
-            cap.set(cv2.CAP_PROP_POS_FRAMES, int(t * fps))
-            ret, frame = cap.read()
-            if not ret:
+            # grab() продвигает поток на кадр вперёд, не конвертируя его —
+            # это дёшево по сравнению с полным read().
+            if not cap.grab():
                 break
 
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            batch_tensors.append(_TRANSFORM(rgb))
-            batch_times.append(t)
+            if frame_idx % step_frames == 0:
+                ret, frame = cap.retrieve()
+                if not ret:
+                    break
+                t = frame_idx / fps
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                batch_tensors.append(_TRANSFORM(rgb))
+                batch_times.append(t)
 
-            if len(batch_tensors) >= batch_size:
-                _flush()
-                if progress_callback and duration:
-                    progress_callback(
-                        min(t / duration, 1.0),
-                        f"Детекция боёв… {min(t / duration * 100, 100):.0f}%",
-                    )
-            i += 1
+                if len(batch_tensors) >= batch_size:
+                    _flush()
+                    if progress_callback and duration:
+                        progress_callback(
+                            min(t / duration, 1.0),
+                            f"Детекция боёв… {min(t / duration * 100, 100):.0f}%",
+                        )
+            frame_idx += 1
         _flush()
     finally:
         cap.release()
 
-    return times, probs, sample_step
+    # Фактический шаг между сэмплами (может чуть отличаться от запрошенного
+    # из-за округления до целого числа кадров) — нужен для точной стейт-машины.
+    actual_step = step_frames / fps
+    return times, probs, actual_step
 
 
 def _detect_segments(
