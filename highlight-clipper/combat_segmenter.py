@@ -39,11 +39,19 @@ _TRANSFORM = transforms.Compose(
 class CombatModel:
     """Обёртка над загруженной моделью: хранит сеть, устройство и режим."""
 
-    def __init__(self, model: nn.Module, num_classes: int, device: str, half: bool):
+    def __init__(
+        self,
+        model: nn.Module,
+        num_classes: int,
+        device: str,
+        half: bool,
+        combat_index: int = _COMBAT_CLASS_INDEX,
+    ):
         self.model = model
         self.num_classes = num_classes
         self.device = device
         self.half = half
+        self.combat_index = combat_index
 
     @torch.no_grad()
     def predict_batch(self, batch: torch.Tensor) -> list[float]:
@@ -57,8 +65,19 @@ class CombatModel:
             probs = torch.sigmoid(logits.squeeze(-1))
         else:
             # Несколько логитов -> softmax -> берём вероятность класса combat.
-            probs = torch.softmax(logits, dim=1)[:, _COMBAT_CLASS_INDEX]
+            probs = torch.softmax(logits, dim=1)[:, self.combat_index]
         return probs.float().cpu().tolist()
+
+
+def _combat_index_from_classes(classes, num_classes: int) -> int:
+    """Определяет индекс класса "combat" по списку имён классов из чекпойнта."""
+    if isinstance(classes, (list, tuple)):
+        for i, name in enumerate(classes):
+            low = name.lower() if isinstance(name, str) else ""
+            if "combat" in low and "no" not in low:
+                return i
+    # Запасной вариант: для 2 классов считаем combat = индекс 1.
+    return _COMBAT_CLASS_INDEX if num_classes > 1 else 0
 
 
 def load_model(
@@ -97,21 +116,28 @@ def load_model(
                 model_path, map_location=device, weights_only=False
             )
 
+        classes = None
         if isinstance(checkpoint, nn.Module):
             # Сохранена вся модель целиком.
             model = checkpoint
             fc = getattr(model, "fc", None)
             num_classes = fc.out_features if isinstance(fc, nn.Linear) else 2
+            combat_index = _combat_index_from_classes(None, num_classes)
         else:
-            # Сохранён state_dict (возможно, вложенный).
+            # Чекпойнт-словарь: достаём сам state_dict из известных ключей.
             state = checkpoint
-            if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-                state = checkpoint["state_dict"]
+            if isinstance(checkpoint, dict):
+                classes = checkpoint.get("classes")
+                for key in ("model_state", "state_dict", "model"):
+                    if key in checkpoint and isinstance(checkpoint[key], dict):
+                        state = checkpoint[key]
+                        break
             # Убираем префикс "module." от DataParallel, если он есть.
             state = {k.replace("module.", "", 1): v for k, v in state.items()}
 
             fc_weight = state.get("fc.weight")
             num_classes = int(fc_weight.shape[0]) if fc_weight is not None else 2
+            combat_index = _combat_index_from_classes(classes, num_classes)
 
             model = torchvision.models.resnet18(weights=None)
             model.fc = nn.Linear(model.fc.in_features, num_classes)
@@ -125,9 +151,10 @@ def load_model(
     if half:
         model.half()
 
-    print(f"[combat_segmenter] Модель загружена: classes={num_classes}, "
-          f"device={device}, fp16={half}")
-    return CombatModel(model, num_classes, device, half)
+    print(f"[combat_segmenter] Модель загружена: classes={num_classes} "
+          f"({classes if classes else 'имена не заданы'}), "
+          f"combat_index={combat_index}, device={device}, fp16={half}")
+    return CombatModel(model, num_classes, device, half, combat_index)
 
 
 def _build_probability_timeline(

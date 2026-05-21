@@ -97,6 +97,10 @@ def cut_clips(
                 cmd,
                 capture_output=True,
                 text=True,
+                # Явно декодируем вывод ffmpeg как UTF-8 с заменой битых байт,
+                # иначе на Windows используется локаль (cp1251) и чтение падает.
+                encoding="utf-8",
+                errors="replace",
                 timeout=300,
             )
         except subprocess.TimeoutExpired:

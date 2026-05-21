@@ -245,7 +245,7 @@ def process_vod(
 
 def build_ui() -> gr.Blocks:
     """Собирает интерфейс Gradio."""
-    with gr.Blocks(title="Highlight Clipper", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(title="Highlight Clipper") as demo:
         gr.Markdown(
             """
             # 🎬 Highlight Clipper
@@ -293,7 +293,6 @@ def build_ui() -> gr.Blocks:
                     label="Статус / результат",
                     lines=16,
                     interactive=False,
-                    show_copy_button=True,
                 )
                 clips_output = gr.Files(
                     label="Готовые клипы (нажми, чтобы скачать)",
@@ -330,4 +329,5 @@ if __name__ == "__main__":
     )
 
     app = build_ui()
-    app.launch()
+    # В Gradio 6 тема передаётся в launch(), а не в конструктор Blocks.
+    app.launch(theme=gr.themes.Soft())
